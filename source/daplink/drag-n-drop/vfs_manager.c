@@ -38,117 +38,11 @@
 #include "target_reset.h"
 #include "file_stream.h"
 #include "error.h"
+#include "intelhex.h"
 
-// Set to 1 to enable debugging
-#define DEBUG_VFS_MANAGER     0
+#include "flash_map.h"
+#include "flash_decoder.h"
 
-#if DEBUG_VFS_MANAGER
-#define vfs_mngr_printf    debug_msg
-#else
-#define vfs_mngr_printf(...)
-#endif
-
-#define INVALID_TIMEOUT_MS  0xFFFFFFFF
-#define MAX_EVENT_TIME_MS   60000
-
-#define CONNECT_DELAY_MS 0
-#define RECONNECT_DELAY_MS 2500    // Must be above 1s for windows (more for linux)
-// TRANSFER_IN_PROGRESS
-#define DISCONNECT_DELAY_TRANSFER_TIMEOUT_MS 20000
-// TRANSFER_CAN_BE_FINISHED
-#define DISCONNECT_DELAY_TRANSFER_IDLE_MS 500
-// TRANSFER_NOT_STARTED || TRASNFER_FINISHED
-#define DISCONNECT_DELAY_MS 500
-
-// Make sure none of the delays exceed the max time
-COMPILER_ASSERT(CONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
-COMPILER_ASSERT(RECONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
-COMPILER_ASSERT(DISCONNECT_DELAY_TRANSFER_TIMEOUT_MS < MAX_EVENT_TIME_MS);
-COMPILER_ASSERT(DISCONNECT_DELAY_TRANSFER_IDLE_MS < MAX_EVENT_TIME_MS);
-COMPILER_ASSERT(DISCONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
-
-typedef enum {
-    TRANSFER_NOT_STARTED,
-    TRANSFER_IN_PROGRESS,
-    TRANSFER_CAN_BE_FINISHED,
-    TRASNFER_FINISHED,
-} transfer_state_t;
-
-typedef struct {
-    vfs_file_t file_to_program;     // A pointer to the directory entry of the file being programmed
-    vfs_sector_t start_sector;      // Start sector of the file being programmed by stream
-    vfs_sector_t file_start_sector; // Start sector of the file being programmed by vfs
-    vfs_sector_t file_next_sector;  // Expected next sector of the file
-    vfs_sector_t last_ooo_sector;   // Last out of order sector within the file
-    uint32_t size_processed;        // The number of bytes processed by the stream
-    uint32_t file_size;             // Size of the file indicated by root dir.  Only allowed to increase
-    uint32_t size_transferred;      // The number of bytes transferred
-    transfer_state_t transfer_state;// Transfer state
-    bool stream_open;               // State of the stream
-    bool stream_started;            // Stream processing started. This only gets reset remount
-    bool stream_finished;           // Stream processing is done. This only gets reset remount
-    bool stream_optional_finish;    // True if the stream processing can be considered done
-    bool file_info_optional_finish; // True if the file transfer can be considered done
-    bool transfer_timeout;          // Set if the transfer was finished because of a timeout. This only gets reset remount
-    stream_type_t stream;           // Current stream or STREAM_TYPE_NONE is stream is closed.  This only gets reset remount
-} file_transfer_state_t;
-
-typedef enum {
-    VFS_MNGR_STATE_DISCONNECTED,
-    VFS_MNGR_STATE_RECONNECTING,
-    VFS_MNGR_STATE_CONNECTED
-} vfs_mngr_state_t;
-
-static const file_transfer_state_t default_transfer_state = {
-    VFS_FILE_INVALID,
-    VFS_INVALID_SECTOR,
-    VFS_INVALID_SECTOR,
-    VFS_INVALID_SECTOR,
-    VFS_INVALID_SECTOR,
-    0,
-    0,
-    0,
-    TRANSFER_NOT_STARTED,
-    false,
-    false,
-    false,
-    false,
-    false,
-    false,
-    STREAM_TYPE_NONE,
-};
-
-static uint32_t usb_buffer[VFS_SECTOR_SIZE / sizeof(uint32_t)];
-static error_t fail_reason = ERROR_SUCCESS;
-static file_transfer_state_t file_transfer_state;
-
-// These variables can be access from multiple threads
-// so access to them must be synchronized
-static vfs_mngr_state_t vfs_state;
-static vfs_mngr_state_t vfs_state_next;
-static uint32_t time_usb_idle;
-
-static OS_MUT sync_mutex;
-static OS_TID sync_thread = 0;
-
-// Synchronization functions
-static void sync_init(void);
-static void sync_assert_usb_thread(void);
-static void sync_lock(void);
-static void sync_unlock(void);
-
-static bool changing_state(void);
-static void build_filesystem(void);
-static void file_change_handler(const vfs_filename_t filename, vfs_file_change_t change, vfs_file_t file, vfs_file_t new_file_data);
-static void file_data_handler(uint32_t sector, const uint8_t *buf, uint32_t num_of_sectors);
-static bool ready_for_state_change(void);
-static void abort_remount(void);
-
-static void transfer_update_file_info(vfs_file_t file, uint32_t start_sector, uint32_t size, stream_type_t stream);
-static void transfer_reset_file_info(void);
-static void transfer_stream_open(stream_type_t stream, uint32_t start_sector);
-static void transfer_stream_data(uint32_t sector, const uint8_t *data, uint32_t size);
-static void transfer_update_state(error_t status);
 
 
 void vfs_mngr_fs_enable(bool enable)
@@ -299,8 +193,9 @@ void usbd_msc_init(void)
     vfs_state_next = VFS_MNGR_STATE_DISCONNECTED;
     time_usb_idle = 0;
     USBD_MSC_MediaReady = 0;
+	map_init();
 }
-
+void flash_prog(uint8_t prog_num);
 void usbd_msc_read_sect(uint32_t sector, uint8_t *buf, uint32_t num_of_sectors)
 {
     sync_assert_usb_thread();
@@ -315,6 +210,14 @@ void usbd_msc_read_sect(uint32_t sector, uint8_t *buf, uint32_t num_of_sectors)
     vfs_read(sector, buf, num_of_sectors);
 }
 
+
+extern uint8_t flash_start_writing;
+extern uint8_t flash_start_writing_counter;
+uint8_t flash_write_state = 0;
+error_t hex_writer(uint8_t *data, uint32_t size);
+
+
+
 void usbd_msc_write_sect(uint32_t sector, uint8_t *buf, uint32_t num_of_sectors)
 {
     sync_assert_usb_thread();
@@ -322,8 +225,10 @@ void usbd_msc_write_sect(uint32_t sector, uint8_t *buf, uint32_t num_of_sectors)
     if (!USBD_MSC_MediaReady) {
         return;
     }
-
-    // Restart the disconnect counter on every packet
+		
+		sendDATA(buf, num_of_sectors);
+    
+		// Restart the disconnect counter on every packet
     // so the device does not detach in the middle of a
     // transfer.
     time_usb_idle = 0;
@@ -331,14 +236,118 @@ void usbd_msc_write_sect(uint32_t sector, uint8_t *buf, uint32_t num_of_sectors)
     if (TRASNFER_FINISHED == file_transfer_state.transfer_state) {
         return;
     }
-
+		
     // indicate msc activity
     main_blink_msc_led(MAIN_LED_FLASH);
-    vfs_write(sector, buf, num_of_sectors);
-    if (TRASNFER_FINISHED == file_transfer_state.transfer_state) {
+		return;
+		
+		vfs_write(sector, buf, num_of_sectors);
+    if (TRASNFER_FINISHED == file_transfer_state.transfer_state){
         return;
     }
-    file_data_handler(sector, buf, num_of_sectors);
+		
+		if(flash_start_writing){//SCHREIBE FLASH DA FLASH ORDNER ERKANNT
+			
+		}else{//PROGRAMMIERE NORMAL
+			
+		}
+		file_data_handler(sector, buf, num_of_sectors);
+}
+
+void sendDATA(uint8_t *buf, uint32_t num_of_sectors){
+	uint32_t size = num_of_sectors * VFS_SECTOR_SIZE;
+	uint32_t cnt = 0;
+	while(1){
+		cnt += USBD_CDC_ACM_DataSend(buf+cnt, size-cnt);
+		if(cnt >= size){
+			break;
+		}
+	}
+}
+
+void flash_prog(uint8_t prog_num){
+	map_entry_t entry;
+	flash_decoder_open();
+	map_read_prog_entry(prog_num,&entry);
+	uint8_t buffer[256];
+	uint32_t prog_size = entry.end - entry.start;
+	uint32_t i = 0;
+	
+	while(i < prog_size ){
+		if((prog_size - i) < 256){
+			map_read_prog_data(prog_num, i, buffer, prog_size - i);
+			flash_decoder_write(i, buffer, prog_size-i);
+			break;
+		}
+		map_read_prog_data(prog_num, i, buffer, 256);
+		flash_decoder_write(i, buffer, 256);
+		i += 256;
+	}
+}
+
+error_t hex_writer(uint8_t *data, uint32_t size){
+	error_t status = ERROR_SUCCESS;
+    uint8_t bin_buffer[256];
+    hexfile_parse_status_t parse_status = HEX_PARSE_UNINIT;
+    uint32_t bin_start_address = 0; // Decoded from the hex file, the binary buffer data starts at this address
+    uint32_t bin_buf_written = 0;   // The amount of data in the binary buffer starting at address above
+    uint32_t block_amt_parsed = 0;  // amount of data parsed in the block on the last call
+	
+
+	
+    while (1) {
+
+        // try to decode a block of hex data into bin data
+        parse_status = parse_hex_blob(data, size, &block_amt_parsed, bin_buffer, sizeof(bin_buffer), &bin_start_address, &bin_buf_written);
+	
+        // the entire block of hex was decoded. This is a simple state
+        if (HEX_PARSE_OK == parse_status) {
+            if (bin_buf_written > 0) {
+							map_write_prog_data(flash_start_writing_counter, bin_start_address, bin_buffer, bin_buf_written);
+            }
+            break;
+        } else if (HEX_PARSE_UNALIGNED == parse_status) {
+            if (bin_buf_written > 0) {
+                map_write_prog_data(flash_start_writing_counter, bin_start_address, bin_buffer, bin_buf_written);
+                if (ERROR_SUCCESS != status) {
+                    break;
+                }
+            }
+            // incrememntal offset to finish the block
+            size -= block_amt_parsed;
+            data += block_amt_parsed;
+        } else if (HEX_PARSE_EOF == parse_status) {
+            if (bin_buf_written > 0) {
+                map_write_prog_data(flash_start_writing_counter, bin_start_address, bin_buffer, bin_buf_written);
+            }
+            if (ERROR_SUCCESS == status) {
+                status = ERROR_SUCCESS_DONE;
+            }
+						flash_write_state = 0;//ENDE ERKANNT
+						
+						map_entry_t entry;
+						entry.start = MAP_DATA_ADDR_OF_PROG(flash_start_writing_counter);
+						entry.end = bin_start_address + bin_buf_written + entry.start;
+						map_write_prog_entry(flash_start_writing_counter, &entry);
+						
+						uint8_t num[] = {'P','N','E'};
+						USBD_CDC_ACM_DataSend(num, 3);
+						USBD_CDC_ACM_DataSend(num, 3);
+						
+            break;
+        } else if (HEX_PARSE_CKSUM_FAIL == parse_status) {
+            status = ERROR_HEX_CKSUM;
+            break;
+        } else if ((HEX_PARSE_UNINIT == parse_status) || (HEX_PARSE_FAILURE == parse_status)) {
+				    util_assert(HEX_PARSE_UNINIT != parse_status);
+            status = ERROR_HEX_PARSER;
+            break;
+        }
+    }
+		
+					
+
+    return status;
 }
 
 static void sync_init(void)
@@ -384,6 +393,7 @@ static void build_filesystem()
 // Callback to handle changes to the root directory.  Should be used with vfs_set_file_change_callback
 static void file_change_handler(const vfs_filename_t filename, vfs_file_change_t change, vfs_file_t file, vfs_file_t new_file_data)
 {
+	
     vfs_mngr_printf("vfs_manager file_change_handler(name=%*s, file=%p, change=%i)\r\n", 11, filename, file, change);
     vfs_user_file_change_handler(filename, change, file, new_file_data);
     if (TRASNFER_FINISHED == file_transfer_state.transfer_state) {
@@ -402,23 +412,74 @@ static void file_change_handler(const vfs_filename_t filename, vfs_file_change_t
     }
 
     if (VFS_FILE_CREATED == change) {
+			if (!memcmp(filename, "FLASH      ", sizeof(vfs_filename_t))) {
+				// FLASH CREATED
+				uint8_t cr[] = {'\n'};
+				USBD_CDC_ACM_DataSend(cr, 1);
+				USBD_CDC_ACM_DataSend((uint8_t*)filename, 11);
+				
+				sf_init();
+				if((sf_sfdp(0) != 0x53) ||
+					 (sf_sfdp(1) != 0x46) ||
+					 (sf_sfdp(2) != 0x44)	||
+					 (sf_sfdp(3) != 0x50)){	//verify that flash is mounted
+					vfs_mngr_fs_remount();
+				}
+				flash_start_writing = 1;
+				flash_start_writing_counter = 0;
+				
+			USBD_CDC_ACM_DataSend(cr, 1);
+			uint8_t num[] = {'O','N',' '};
+			USBD_CDC_ACM_DataSend(num, 3);
+			USBD_CDC_ACM_DataSend(cr, 1);
+			}
+			
         stream_type_t stream;
-
         if (STREAM_TYPE_NONE != stream_type_from_name(filename)) {
             // Check for a know file extension to detect the current file being
             // transferred.  Ignore hidden files since MAC uses hidden files with
             // the same extension to keep track of transfer info in some cases.
-            if (!(VFS_FILE_ATTR_HIDDEN & vfs_file_get_attr(new_file_data))) {
-                stream = stream_type_from_name(filename);
-                uint32_t size = vfs_file_get_size(new_file_data);
-                vfs_sector_t sector = vfs_file_get_start_sector(new_file_data);
-                transfer_update_file_info(file, sector, size, stream);
+            if ((!(VFS_FILE_ATTR_HIDDEN & vfs_file_get_attr(new_file_data))) && !flash_start_writing ){
+							
+							uint8_t cr[] = {'\n'};
+							USBD_CDC_ACM_DataSend(cr, 1);
+							uint8_t num[] = {'F','M',' '};
+							USBD_CDC_ACM_DataSend(num, 3);
+							USBD_CDC_ACM_DataSend(filename, 11);
+							
+							flash_start_writing_counter++;
+							uint8_t numb[] = {' ', (flash_start_writing_counter & 255) + '0'};
+							USBD_CDC_ACM_DataSend(numb, 2);
+							
+							//SAVE FILE NAME SEND TO MINI DRIVE
+							//entry.pos = fm_find_pos();				//find next position in flash
+							//memcpy(entry.filename, filename, 11);		//save the name
+							
+              stream = stream_type_from_name(filename);
+              uint32_t size = vfs_file_get_size(new_file_data);
+              vfs_sector_t sector = vfs_file_get_start_sector(new_file_data);
+              transfer_update_file_info(file, sector, size, stream);
             }
         }
     }
 
     if (VFS_FILE_DELETED == change) {
-        if (file == file_transfer_state.file_to_program) {
+			//DELETE FILENAME
+				if (!memcmp(filename, "FLASH      ", sizeof(vfs_filename_t))) {
+					// Clear assert and remount to update the drive
+					//DELETE FLASH
+					uint8_t cr[] = {'\n'};
+					USBD_CDC_ACM_DataSend(cr, 1);
+					USBD_CDC_ACM_DataSend((uint8_t*)filename, 11);
+					flash_start_writing = 0;
+					flash_start_writing_counter = 0;
+					//vfs_mngr_fs_remount();
+					
+					sf_delete_chip();
+					uint8_t num[] = {'D','E','L'};
+					USBD_CDC_ACM_DataSend(num, 3);
+				}
+				if (file == file_transfer_state.file_to_program) {
             // The file that was being transferred has been deleted
             transfer_reset_file_info();
         }
@@ -442,7 +503,7 @@ static void file_data_handler(uint32_t sector, const uint8_t *buf, uint32_t num_
             transfer_stream_open(stream, sector);
         }
     }
-
+		
     if (file_transfer_state.stream_started) {
         // Ignore sectors coming before this file
         if (sector < file_transfer_state.start_sector) {
@@ -482,10 +543,9 @@ static void file_data_handler(uint32_t sector, const uint8_t *buf, uint32_t num_
             vfs_mngr_printf("vfs_manager file_data_handler\r\n    sector=%i, size=%i\r\n", sector, size);
             vfs_mngr_printf("    discarding data - size transferred=0x%x, data=%x,%x,%x,%x,...\r\n",
                             file_transfer_state.size_transferred, buf[0], buf[1], buf[2], buf[3]);
-            transfer_update_state(ERROR_SUCCESS);
+					transfer_update_state(ERROR_SUCCESS);
             return;
         }
-
         transfer_stream_data(sector, buf, size);
     }
 }
@@ -698,7 +758,9 @@ static void transfer_stream_data(uint32_t sector, const uint8_t *data, uint32_t 
 
     util_assert(size % VFS_SECTOR_SIZE == 0);
     util_assert(file_transfer_state.stream_open);
+
     status = stream_write((uint8_t *)data, size);
+		
     vfs_mngr_printf("    stream_write ret=%i\r\n", status);
 
     if (ERROR_SUCCESS_DONE == status) {
@@ -826,6 +888,6 @@ static void transfer_update_state(error_t status)
     // If this state change is not from aborting a transfer
     // due to a remount then trigger a remount
     if (!transfer_timeout) {
-        vfs_mngr_fs_remount();
+        //vfs_mngr_fs_remount();
     }
 }

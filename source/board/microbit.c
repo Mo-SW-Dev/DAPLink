@@ -26,11 +26,11 @@
 // the null terminated character
 // Note - 4 byte alignemnt required as workaround for ARMCC compiler bug with weak references
 __attribute__((aligned(4)))
-const char daplink_url_name[11] =   "MICROBITHTM";
+const char daplink_url_name[11] =   "CALLIOPEHTM";
 __attribute__((aligned(4)))
-const char daplink_drive_name[11] = "MICROBIT   ";
+const char daplink_drive_name[11] = "MINI       ";
 __attribute__((aligned(4)))
-const char *const daplink_target_url = "https://microbit.org/device/?id=@B&v=@V";
+const char *const daplink_target_url = "https://calliope.cc";
 
 const char *board_id = "";
 const char * const board_id_mb_1_3 = "9900";

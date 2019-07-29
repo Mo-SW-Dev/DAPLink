@@ -27,6 +27,7 @@
 
 #include "virtual_fs.h"
 #include "error.h"
+#include "file_stream.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +74,120 @@ void vfs_user_file_change_handler(const vfs_filename_t filename, vfs_file_change
 
 // Called when VFS is disconnecting
 void vfs_user_disconnecting(void);
+
+
+// Set to 1 to enable debugging
+#define DEBUG_VFS_MANAGER     0
+
+#if DEBUG_VFS_MANAGER
+#define vfs_mngr_printf    debug_msg
+#else
+#define vfs_mngr_printf(...)
+#endif
+
+#define INVALID_TIMEOUT_MS  0xFFFFFFFF
+#define MAX_EVENT_TIME_MS   60000
+
+#define CONNECT_DELAY_MS 0
+#define RECONNECT_DELAY_MS 2500    // Must be above 1s for windows (more for linux)
+// TRANSFER_IN_PROGRESS
+#define DISCONNECT_DELAY_TRANSFER_TIMEOUT_MS 20000
+// TRANSFER_CAN_BE_FINISHED
+#define DISCONNECT_DELAY_TRANSFER_IDLE_MS 500
+// TRANSFER_NOT_STARTED || TRASNFER_FINISHED
+#define DISCONNECT_DELAY_MS 500
+
+// Make sure none of the delays exceed the max time
+COMPILER_ASSERT(CONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
+COMPILER_ASSERT(RECONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
+COMPILER_ASSERT(DISCONNECT_DELAY_TRANSFER_TIMEOUT_MS < MAX_EVENT_TIME_MS);
+COMPILER_ASSERT(DISCONNECT_DELAY_TRANSFER_IDLE_MS < MAX_EVENT_TIME_MS);
+COMPILER_ASSERT(DISCONNECT_DELAY_MS < MAX_EVENT_TIME_MS);
+
+typedef enum {
+    TRANSFER_NOT_STARTED,
+    TRANSFER_IN_PROGRESS,
+    TRANSFER_CAN_BE_FINISHED,
+    TRASNFER_FINISHED,
+} transfer_state_t;
+
+typedef struct {
+    vfs_file_t file_to_program;     // A pointer to the directory entry of the file being programmed
+    vfs_sector_t start_sector;      // Start sector of the file being programmed by stream
+    vfs_sector_t file_start_sector; // Start sector of the file being programmed by vfs
+    vfs_sector_t file_next_sector;  // Expected next sector of the file
+    vfs_sector_t last_ooo_sector;   // Last out of order sector within the file
+    uint32_t size_processed;        // The number of bytes processed by the stream
+    uint32_t file_size;             // Size of the file indicated by root dir.  Only allowed to increase
+    uint32_t size_transferred;      // The number of bytes transferred
+    transfer_state_t transfer_state;// Transfer state
+    bool stream_open;               // State of the stream
+    bool stream_started;            // Stream processing started. This only gets reset remount
+    bool stream_finished;           // Stream processing is done. This only gets reset remount
+    bool stream_optional_finish;    // True if the stream processing can be considered done
+    bool file_info_optional_finish; // True if the file transfer can be considered done
+    bool transfer_timeout;          // Set if the transfer was finished because of a timeout. This only gets reset remount
+    stream_type_t stream;           // Current stream or STREAM_TYPE_NONE is stream is closed.  This only gets reset remount
+} file_transfer_state_t;
+
+typedef enum {
+    VFS_MNGR_STATE_DISCONNECTED,
+    VFS_MNGR_STATE_RECONNECTING,
+    VFS_MNGR_STATE_CONNECTED
+} vfs_mngr_state_t;
+
+static const file_transfer_state_t default_transfer_state = {
+    VFS_FILE_INVALID,
+    VFS_INVALID_SECTOR,
+    VFS_INVALID_SECTOR,
+    VFS_INVALID_SECTOR,
+    VFS_INVALID_SECTOR,
+    0,
+    0,
+    0,
+    TRANSFER_NOT_STARTED,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    STREAM_TYPE_NONE,
+};
+
+static uint32_t usb_buffer[VFS_SECTOR_SIZE / sizeof(uint32_t)];
+static error_t fail_reason = ERROR_SUCCESS;
+static file_transfer_state_t file_transfer_state;
+
+// These variables can be access from multiple threads
+// so access to them must be synchronized
+static vfs_mngr_state_t vfs_state;
+static vfs_mngr_state_t vfs_state_next;
+static uint32_t time_usb_idle;
+
+static OS_MUT sync_mutex;
+static OS_TID sync_thread = 0;
+
+// Synchronization functions
+static void sync_init(void);
+static void sync_assert_usb_thread(void);
+static void sync_lock(void);
+static void sync_unlock(void);
+
+static bool changing_state(void);
+static void build_filesystem(void);
+static void file_change_handler(const vfs_filename_t filename, vfs_file_change_t change, vfs_file_t file, vfs_file_t new_file_data);
+static void file_data_handler(uint32_t sector, const uint8_t *buf, uint32_t num_of_sectors);
+static bool ready_for_state_change(void);
+static void abort_remount(void);
+
+static void transfer_update_file_info(vfs_file_t file, uint32_t start_sector, uint32_t size, stream_type_t stream);
+static void transfer_reset_file_info(void);
+static void transfer_stream_open(stream_type_t stream, uint32_t start_sector);
+static void transfer_stream_data(uint32_t sector, const uint8_t *data, uint32_t size);
+static void transfer_update_state(error_t status);
+
+void sendDATA(uint8_t *buf, uint32_t num_of_sectors);
 
 
 #ifdef __cplusplus

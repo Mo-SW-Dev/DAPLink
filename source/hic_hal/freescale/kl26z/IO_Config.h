@@ -37,6 +37,43 @@
 // This GPIO configuration is only valid for the KL26 HIC
 COMPILER_ASSERT(DAPLINK_HIC_ID == DAPLINK_HIC_ID_KL26);
 
+//SPI PORT
+
+// MISO Pin                    PTD7(D7)
+#define PIN_MISO_PORT          PORTC
+#define PIN_MISO_GPIO          PTC
+#define PIN_MISO_BIT           (7)
+#define PIN_MISO               (1<<PIN_MISO_BIT)
+
+// MOSI Pin                    PTD6(D6)
+#define PIN_MOSI_PORT          PORTD
+#define PIN_MOSI_GPIO          PTD
+#define PIN_MOSI_BIT           (6)
+#define PIN_MOSI               (1<<PIN_MOSI_BIT)
+
+// SCK Pin                    PTD5(D5)
+#define PIN_SCK_PORT          PORTD
+#define PIN_SCK_GPIO          PTD
+#define PIN_SCK_BIT           (5)
+#define PIN_SCK               (1<<PIN_SCK_BIT)
+
+// FL_RESET Pin                    PTB0(B0)
+#define PIN_FL_RESET_PORT          PORTB
+#define PIN_FL_RESET_GPIO          PTB
+#define PIN_FL_RESET_BIT           (0)
+#define PIN_FL_RESET               (1<<PIN_FL_RESET_BIT)
+
+// FL_CS Pin                    PTC2(C2)
+#define PIN_FL_CS_PORT          PORTC
+#define PIN_FL_CS_GPIO          PTC
+#define PIN_FL_CS_BIT           (2)
+#define PIN_FL_CS               (1<<PIN_FL_CS_BIT)
+
+// FL_W Pin                    PTC1(C1)
+#define PIN_FL_W_PORT          PORTC
+#define PIN_FL_W_GPIO          PTC
+#define PIN_FL_W_BIT           (1)
+#define PIN_FL_W               (1<<PIN_FL_W_BIT)
 
 // Debug Port I/O Pins
 
@@ -55,7 +92,7 @@ COMPILER_ASSERT(DAPLINK_HIC_ID == DAPLINK_HIC_ID_KL26);
 // nRESET Pin                   PTC8(C8)
 #define PIN_nRESET_PORT         PORTC
 #define PIN_nRESET_GPIO         PTC
-#define PIN_nRESET_BIT          (8)
+#define PIN_nRESET_BIT          (6)
 #define PIN_nRESET              (1<<PIN_nRESET_BIT)
 
 // PWR_REG_EN PTD2 - Not connected

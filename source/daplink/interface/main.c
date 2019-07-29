@@ -43,6 +43,8 @@
 #include "sdk.h"
 #include "flash_intf.h"
 
+#include "serial_flash.h"
+
 // Event flags for main task
 // Timers events
 #define FLAGS_MAIN_90MS         (1 << 0)
@@ -103,6 +105,8 @@ static bool usb_test_mode = false;
 
 static U64 stk_timer_30_task[TIMER_TASK_30_STACK / sizeof(U64)];
 static U64 stk_main_task[MAIN_TASK_STACK / sizeof(U64)];
+
+extern void flash_prog(uint8_t prog_num);
 
 // Timer task, set flags every 30mS and 90mS
 __task void timer_task_30mS(void)
@@ -189,6 +193,8 @@ __attribute__((weak)) void prerun_target_config(void) {}
 
 __task void main_task(void)
 {
+
+		
     // State processing
     uint16_t flags = 0;
     // LED
@@ -227,7 +233,10 @@ __task void main_task(void)
     usb_state_count = USB_CONNECT_DELAY;
     // Start timer tasks
     os_tsk_create_user(timer_task_30mS, TIMER_TASK_30_PRIORITY, (void *)stk_timer_30_task, TIMER_TASK_30_STACK);
-
+		
+		
+		uint8_t reset_counter = 0;
+		
     while (1) {
         os_evt_wait_or(FLAGS_MAIN_RESET             // Put target in reset state
                        | FLAGS_MAIN_90MS            // 90mS tick
@@ -281,6 +290,7 @@ __task void main_task(void)
         if (flags & FLAGS_MAIN_90MS) {
             // Update USB busy status
             vfs_mngr_periodic(90); // FLAGS_MAIN_90MS
+					
 
             // Update USB connect status
             switch (usb_state) {
@@ -327,6 +337,23 @@ __task void main_task(void)
 
         // 30mS tick used for flashing LED when USB is busy
         if (flags & FLAGS_MAIN_30MS) {
+					
+					//reset after reset button has been pressed more than 3 sec
+					//for the future change to flash the selector.hex file
+					if(reset_pressed){
+						reset_counter++;
+					}
+					if(reset_counter >= 100){
+						//reset
+
+//							uint8_t num[] = {'N','N','1'};
+//							USBD_CDC_ACM_DataSend(num, 3);
+//							flash_prog(2);
+//							num[2] = '2';
+//							USBD_CDC_ACM_DataSend(num, 3);
+
+							SystemReset();
+					}
 
             // handle reset button without eventing
             if (!reset_pressed && gpio_get_reset_btn_fwrd() && !flash_intf_target->flash_busy()) { //added checking if flashing on target is in progress

@@ -93,7 +93,7 @@ static error_t target_flash_uninit(void)
     }
     // Check to see if anything needs to be done after programming.
     // This is usually a no-op for most targets.
-    target_set_state(POST_FLASH_RESET);
+    target_set_state(RESET_RUN); //POST_FLASH_RESET
     state = STATE_CLOSED;
     swd_off();
     return ERROR_SUCCESS;

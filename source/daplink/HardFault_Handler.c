@@ -71,7 +71,7 @@ void HardFault_Handler()
 
 #endif //#ifndef __CORTEX_M
 
-    util_assert(0);
+    //util_assert(0);
     SystemReset();
 
     while (1); // Wait for reset

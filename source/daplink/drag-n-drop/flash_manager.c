@@ -27,6 +27,10 @@
 #include "macro.h"
 #include "error.h"
 
+#include "RTL.h"
+#include "rl_usb.h"
+#include "flash_map.h"
+
 // Set to 1 to enable debugging
 #define DEBUG_FLASH_MANAGER     0
 
@@ -60,6 +64,8 @@ static state_t state = STATE_CLOSED;
 
 static bool flash_intf_valid(const flash_intf_t *flash_intf);
 static error_t setup_next_sector(uint32_t addr);
+
+extern uint8_t flash_start_writing;
 
 error_t flash_manager_init(const flash_intf_t *flash_intf)
 {
@@ -143,15 +149,29 @@ error_t flash_manager_data(uint32_t addr, const uint8_t *data, uint32_t size)
         }
         current_sector_valid = true;
     }
-
+		
+		
+		
     while (true) {
         // flush if necessary
         if (addr >= current_write_block_addr + current_write_block_size) {
 
             // Write out current buffer if there is data in it
             if (!buf_empty) {
-                status = intf->program_page(current_write_block_addr, buf, current_write_block_size);
-                flash_manager_printf("    intf->program_page(addr=0x%x, size=0x%x) ret=%i\r\n", current_write_block_addr, current_write_block_size, status);
+							
+							if(flash_start_writing){//WRITE FLASH
+
+							}else{//PROGRAMMIERE
+									
+							}
+							status = intf->program_page(current_write_block_addr, buf, current_write_block_size);
+							
+							
+	//			USBD_CDC_ACM_DataSend(entry.filename, 11);
+	//	USBD_CDC_ACM_DataSend(entry.filename+11, 4);
+							
+              
+							flash_manager_printf("    intf->program_page(addr=0x%x, size=0x%x) ret=%i\r\n", current_write_block_addr, current_write_block_size, status);
 
                 if (ERROR_SUCCESS != status) {
                     state = STATE_ERROR;

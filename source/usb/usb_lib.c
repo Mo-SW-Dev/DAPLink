@@ -1261,6 +1261,9 @@ U32  usbd_os_evt_wait_or(U16 wait_flags, U16 timeout)
 
 void usbd_class_init(void)
 {
+#if (USBD_CDC_ACM_ENABLE)
+    USBD_CDC_ACM_Initialize();
+#endif
 #if (USBD_HID_ENABLE)
     usbd_hid_init();
 #endif
@@ -1269,9 +1272,6 @@ void usbd_class_init(void)
 #endif
 #if (USBD_ADC_ENABLE)
     usbd_adc_init();
-#endif
-#if (USBD_CDC_ACM_ENABLE)
-    USBD_CDC_ACM_Initialize();
 #endif
 #if (USBD_CLS_ENABLE)
     usbd_cls_init();
